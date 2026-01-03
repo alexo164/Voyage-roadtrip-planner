@@ -4,8 +4,25 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import { useTripStore } from '@/store/tripStore';
-import { Location } from '@/types';
+import { Location, DestinationType } from '@/types';
 import { MapPin, Navigation, Loader2 } from 'lucide-react';
+
+// Get marker color class based on destination type
+function getMarkerTypeClass(destType?: DestinationType): string {
+  switch (destType) {
+    case 'mountain_pass':
+      return 'marker-mountain';
+    case 'scenic_route':
+      return 'marker-route';
+    case 'landmark':
+      return 'marker-landmark';
+    case 'region':
+      return 'marker-region';
+    case 'city':
+    default:
+      return '';
+  }
+}
 import toast from 'react-hot-toast';
 
 // Default to European center (will be overridden by actual token)
@@ -46,7 +63,7 @@ export function TripMap({ onLocationSelect }: TripMapProps) {
     
     map.current = new mapboxgl.Map({
       container: mapContainer.current,
-      style: 'mapbox://styles/mapbox/dark-v11',
+      style: 'mapbox://styles/alexoltean16/cmjyn9brc002a01sgha1b5le0/draft',
       center: DEFAULT_CENTER,
       zoom: DEFAULT_ZOOM,
       pitch: 30,
@@ -201,7 +218,8 @@ export function TripMap({ onLocationSelect }: TripMapProps) {
       } else {
         // Create new marker
         const el = document.createElement('div');
-        el.className = `custom-marker stop ${selectedStopId === stop.id ? 'selected' : ''}`;
+        const typeClass = getMarkerTypeClass(stop.location.destinationType);
+        el.className = `custom-marker stop ${typeClass} ${selectedStopId === stop.id ? 'selected' : ''}`;
         el.innerHTML = `${index + 1}`;
         el.onclick = (e) => {
           e.stopPropagation();

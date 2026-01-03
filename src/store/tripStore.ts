@@ -1,12 +1,40 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { Trip, Stop, Location, AdvisorMessage, TripRoute, PriceAnalysis } from '@/types';
+import { Trip, Stop, Location, AdvisorMessage, TripRoute, PriceAnalysis, Accommodation, HotelFilters } from '@/types';
 import { generateId, calculateDistanceKm, estimateDrivingMinutes } from '@/lib/utils';
 import { fetchFullRoute, optimizeRouteOrder as optimizeOrder } from '@/lib/routing';
+
+// Airport type
+export interface TripAirport {
+  code: string;        // IATA code (e.g., DUB)
+  icao?: string;       // ICAO code (e.g., EIDW)
+  name: string;
+  city: string;
+  country?: string;
+  countryCode?: string;
+  lat?: number;
+  lng?: number;
+}
+
+// Alias for backwards compatibility
+export type OriginAirport = TripAirport;
 
 interface TripState {
   // Current trip
   currentTrip: Trip | null;
+  
+  // Home airport (user's base, persisted across trips)
+  homeAirport: TripAirport | null;
+  
+  // Auto-detected airports from route
+  destinationAirport: TripAirport | null;  // Nearest airport to first stop
+  returnAirport: TripAirport | null;       // Nearest airport to last stop
+  
+  // Airport night (late arrival handling)
+  airportNightNeeded: boolean;
+  
+  // Origin airports for flight search (legacy, will use homeAirport)
+  originAirports: TripAirport[];
   
   // Route information
   route: TripRoute | null;
@@ -19,10 +47,16 @@ interface TripState {
   priceAnalysis: PriceAnalysis | null;
   isPriceLoading: boolean;
   
+  // Hotel Search
+  hotelsByStopId: Record<string, Accommodation[]>;
+  isHotelSearching: boolean;
+  hotelFilters: HotelFilters;
+  expandedHotelStopId: string | null;
+  
   // UI State
   selectedStopId: string | null;
   isSidebarOpen: boolean;
-  activeTab: 'stops' | 'hotels' | 'flights' | 'advisor' | 'optimize';
+  activeTab: 'stops' | 'flights' | 'hotels' | 'advisor';
   
   // Actions
   createTrip: (name: string) => void;
@@ -46,14 +80,39 @@ interface TripState {
   setAdvisorLoading: (loading: boolean) => void;
   clearAdvisorMessages: () => void;
   
-// Route
-      updateRoute: () => void;
-      isRouteFetching: boolean;
-      optimizeRouteOrder: () => Promise<void>;
+  // Route
+  updateRoute: () => void;
+  isRouteFetching: boolean;
+  optimizeRouteOrder: () => Promise<void>;
   
   // Price Analysis
   setPriceAnalysis: (analysis: PriceAnalysis | null) => void;
   setPriceLoading: (loading: boolean) => void;
+  
+  // Hotel Search
+  setHotelsByStopId: (stopId: string, hotels: Accommodation[]) => void;
+  setHotelSearching: (loading: boolean) => void;
+  setHotelFilters: (filters: Partial<HotelFilters>) => void;
+  selectHotelForStop: (stopId: string, hotel: Accommodation) => void;
+  clearHotelForStop: (stopId: string) => void;
+  setExpandedHotelStopId: (stopId: string | null) => void;
+  searchAllHotels: () => Promise<void>;
+  getTotalHotelCost: () => { total: number; currency: string; nights: number };
+  
+  // Origin Airports (legacy)
+  setOriginAirports: (airports: TripAirport[]) => void;
+  addOriginAirport: (airport: TripAirport) => void;
+  removeOriginAirport: (code: string) => void;
+  
+  // Home Airport
+  setHomeAirport: (airport: TripAirport | null) => void;
+  
+  // Auto-detected airports
+  setDestinationAirport: (airport: TripAirport | null) => void;
+  setReturnAirport: (airport: TripAirport | null) => void;
+  
+  // Airport night
+  setAirportNightNeeded: (needed: boolean) => void;
   
   // Reset
   resetTrip: () => void;
@@ -72,15 +131,28 @@ const DEFAULT_TRIP: Trip = {
   updatedAt: new Date(),
 };
 
+const DEFAULT_HOTEL_FILTERS: HotelFilters = {
+  sortBy: 'rating',
+};
+
 export const useTripStore = create<TripState>()(
   persist(
     (set, get) => ({
       currentTrip: { ...DEFAULT_TRIP },
+      homeAirport: null,
+      destinationAirport: null,
+      returnAirport: null,
+      airportNightNeeded: false,
+      originAirports: [],
       route: null,
       advisorMessages: [],
       isAdvisorLoading: false,
       priceAnalysis: null,
       isPriceLoading: false,
+      hotelsByStopId: {},
+      isHotelSearching: false,
+      hotelFilters: DEFAULT_HOTEL_FILTERS,
+      expandedHotelStopId: null,
       selectedStopId: null,
       isSidebarOpen: true,
       activeTab: 'stops',
@@ -334,6 +406,191 @@ export const useTripStore = create<TripState>()(
         set({ isPriceLoading: loading });
       },
       
+      // Hotel search actions
+      setHotelsByStopId: (stopId, hotels) => {
+        set((state) => ({
+          hotelsByStopId: {
+            ...state.hotelsByStopId,
+            [stopId]: hotels,
+          },
+        }));
+      },
+      
+      setHotelSearching: (loading) => {
+        set({ isHotelSearching: loading });
+      },
+      
+      setHotelFilters: (filters) => {
+        set((state) => ({
+          hotelFilters: { ...state.hotelFilters, ...filters },
+        }));
+      },
+      
+      selectHotelForStop: (stopId, hotel) => {
+        const { currentTrip } = get();
+        if (!currentTrip) return;
+        
+        const newStops = currentTrip.stops.map((stop) =>
+          stop.id === stopId ? { ...stop, accommodation: hotel } : stop
+        );
+        
+        set({
+          currentTrip: {
+            ...currentTrip,
+            stops: newStops,
+            updatedAt: new Date(),
+          },
+        });
+      },
+      
+      clearHotelForStop: (stopId) => {
+        const { currentTrip } = get();
+        if (!currentTrip) return;
+        
+        const newStops = currentTrip.stops.map((stop) =>
+          stop.id === stopId ? { ...stop, accommodation: undefined } : stop
+        );
+        
+        set({
+          currentTrip: {
+            ...currentTrip,
+            stops: newStops,
+            updatedAt: new Date(),
+          },
+        });
+      },
+      
+      setExpandedHotelStopId: (stopId) => {
+        set({ expandedHotelStopId: stopId });
+      },
+      
+      searchAllHotels: async () => {
+        const { currentTrip, hotelFilters } = get();
+        if (!currentTrip) return;
+        
+        // Get stops that need hotels (stays with 1+ nights)
+        const staysWithNights = currentTrip.stops.filter(
+          (stop) => stop.stopType !== 'stopover' && stop.daysPlanned >= 1
+        );
+        
+        if (staysWithNights.length === 0) return;
+        
+        set({ isHotelSearching: true });
+        
+        try {
+          // Search hotels for all stops in parallel
+          const searchPromises = staysWithNights.map(async (stop) => {
+            try {
+              const response = await fetch('/api/search/hotels', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  location: stop.location.city,
+                  filters: {
+                    minPrice: hotelFilters.minPrice,
+                    maxPrice: hotelFilters.maxPrice,
+                    minRating: hotelFilters.minRating,
+                    sortBy: hotelFilters.sortBy === 'price_low' || hotelFilters.sortBy === 'price_high' 
+                      ? 'price' 
+                      : hotelFilters.sortBy === 'rating' || hotelFilters.sortBy === 'reviews'
+                        ? 'rating'
+                        : 'rating',
+                  },
+                }),
+              });
+              
+              if (!response.ok) throw new Error('Search failed');
+              
+              const { results } = await response.json();
+              return { stopId: stop.id, hotels: results };
+            } catch (error) {
+              console.error(`Hotel search failed for ${stop.location.city}:`, error);
+              return { stopId: stop.id, hotels: [] };
+            }
+          });
+          
+          const results = await Promise.all(searchPromises);
+          
+          // Update state with all results
+          const newHotelsByStopId: Record<string, Accommodation[]> = {};
+          results.forEach(({ stopId, hotels }) => {
+            newHotelsByStopId[stopId] = hotels;
+          });
+          
+          set({ hotelsByStopId: newHotelsByStopId });
+        } catch (error) {
+          console.error('Hotel search error:', error);
+        } finally {
+          set({ isHotelSearching: false });
+        }
+      },
+      
+      getTotalHotelCost: () => {
+        const { currentTrip } = get();
+        if (!currentTrip) return { total: 0, currency: 'EUR', nights: 0 };
+        
+        let total = 0;
+        let nights = 0;
+        let currency = 'EUR';
+        
+        currentTrip.stops.forEach((stop) => {
+          if (stop.accommodation && stop.stopType !== 'stopover' && stop.daysPlanned >= 1) {
+            const stopNights = stop.daysPlanned;
+            total += stop.accommodation.pricePerNight * stopNights;
+            nights += stopNights;
+            currency = stop.accommodation.currency;
+          }
+        });
+        
+        return { total, currency, nights };
+      },
+      
+      // Origin Airports
+      setOriginAirports: (airports) => {
+        set({ originAirports: airports });
+      },
+      
+      addOriginAirport: (airport) => {
+        const { originAirports } = get();
+        // Prevent duplicates
+        if (originAirports.some(a => a.code === airport.code)) {
+          return;
+        }
+        // Limit to 4 airports
+        if (originAirports.length >= 4) {
+          return;
+        }
+        set({ originAirports: [...originAirports, airport] });
+      },
+      
+      removeOriginAirport: (code) => {
+        const { originAirports } = get();
+        set({ originAirports: originAirports.filter(a => a.code !== code) });
+      },
+      
+      // Home Airport
+      setHomeAirport: (airport) => {
+        set({ homeAirport: airport });
+        // Also sync to originAirports for backwards compatibility
+        if (airport) {
+          set({ originAirports: [airport] });
+        }
+      },
+      
+      // Auto-detected airports
+      setDestinationAirport: (airport) => {
+        set({ destinationAirport: airport });
+      },
+      
+      setReturnAirport: (airport) => {
+        set({ returnAirport: airport });
+      },
+      
+      // Airport night
+      setAirportNightNeeded: (needed) => {
+        set({ airportNightNeeded: needed });
+      },
+      
       optimizeRouteOrder: async () => {
         const { currentTrip, updateRoute } = get();
         if (!currentTrip || currentTrip.stops.length < 3) {
@@ -394,6 +651,10 @@ export const useTripStore = create<TripState>()(
       partialize: (state) => ({
         currentTrip: state.currentTrip,
         advisorMessages: state.advisorMessages,
+        originAirports: state.originAirports,
+        homeAirport: state.homeAirport,
+        destinationAirport: state.destinationAirport,
+        returnAirport: state.returnAirport,
       }),
     }
   )

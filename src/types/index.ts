@@ -1,5 +1,7 @@
 // Core data types for the Road Trip Planner
 
+export type DestinationType = 'city' | 'scenic_route' | 'mountain_pass' | 'landmark' | 'region' | 'other';
+
 export interface Location {
   name: string;
   city: string;
@@ -8,6 +10,7 @@ export interface Location {
   lat: number;
   lng: number;
   placeId?: string;
+  destinationType?: DestinationType;
 }
 
 export type StopType = 'stay' | 'stopover';
@@ -55,10 +58,27 @@ export interface Accommodation {
   pricePerNight: number;
   currency: string;
   rating: number;
+  stars?: number; // Hotel stars (1-5)
   reviewCount: number;
   imageUrl?: string;
   bookingUrl: string;
   amenities: string[];
+}
+
+// Hotel search state for the entire trip
+export interface TripHotelSearch {
+  hotelsByStopId: Record<string, Accommodation[]>;
+  isLoading: boolean;
+  lastSearched: Date | null;
+  filters: HotelFilters;
+}
+
+export interface HotelFilters {
+  minPrice?: number;
+  maxPrice?: number;
+  minRating?: number;
+  minStars?: number;
+  sortBy: 'price_low' | 'price_high' | 'rating' | 'stars' | 'reviews';
 }
 
 export interface Flight {

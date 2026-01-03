@@ -1,9 +1,9 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { Search, MapPin, Loader2, X, Navigation } from 'lucide-react';
+import { Search, MapPin, Loader2, X, Navigation, Mountain, Route, Building2, Landmark, Globe } from 'lucide-react';
 import { useTripStore } from '@/store/tripStore';
-import { Location } from '@/types';
+import { Location, DestinationType } from '@/types';
 import { cn, getCountryFlag } from '@/lib/utils';
 import toast from 'react-hot-toast';
 
@@ -12,7 +12,138 @@ interface SearchResult {
   place_name: string;
   text: string;
   center: [number, number]; // [lng, lat]
+  place_type?: string[];
+  properties?: {
+    category?: string;
+    maki?: string;
+  };
   context?: Array<{ id: string; text: string; short_code?: string }>;
+}
+
+type SearchCategory = 'all' | 'cities' | 'scenic_routes' | 'mountain_passes' | 'landmarks';
+
+interface CategoryConfig {
+  label: string;
+  icon: React.ElementType;
+  types: string;
+  description: string;
+}
+
+const SEARCH_CATEGORIES: Record<SearchCategory, CategoryConfig> = {
+  all: {
+    label: 'All',
+    icon: Globe,
+    types: 'place,locality,poi,poi.landmark,region,district,address',
+    description: 'Search everything',
+  },
+  cities: {
+    label: 'Cities',
+    icon: Building2,
+    types: 'place,locality,neighborhood',
+    description: 'Cities & towns',
+  },
+  scenic_routes: {
+    label: 'Routes',
+    icon: Route,
+    types: 'poi,poi.landmark,region,district',
+    description: 'Scenic roads & drives',
+  },
+  mountain_passes: {
+    label: 'Passes',
+    icon: Mountain,
+    types: 'poi,poi.landmark',
+    description: 'Mountain passes',
+  },
+  landmarks: {
+    label: 'Landmarks',
+    icon: Landmark,
+    types: 'poi,poi.landmark',
+    description: 'Points of interest',
+  },
+};
+
+// Helper to detect destination type from Mapbox result
+function detectDestinationType(result: SearchResult, category: SearchCategory): DestinationType {
+  const placeType = result.place_type?.[0] || '';
+  const categoryStr = result.properties?.category?.toLowerCase() || '';
+  const name = result.text.toLowerCase();
+  const placeName = result.place_name.toLowerCase();
+  
+  // Check for mountain passes
+  if (
+    name.includes('pass') || 
+    name.includes('col ') || 
+    name.includes('passo') ||
+    placeName.includes('pass') ||
+    categoryStr.includes('mountain') ||
+    category === 'mountain_passes'
+  ) {
+    return 'mountain_pass';
+  }
+  
+  // Check for scenic routes
+  if (
+    name.includes('route') || 
+    name.includes('way') ||
+    name.includes('road') ||
+    name.includes('drive') ||
+    name.includes('highway') ||
+    categoryStr.includes('road') ||
+    category === 'scenic_routes'
+  ) {
+    return 'scenic_route';
+  }
+  
+  // Check for landmarks/POIs
+  if (placeType === 'poi' || placeType === 'poi.landmark' || category === 'landmarks') {
+    return 'landmark';
+  }
+  
+  // Check for regions
+  if (placeType === 'region' || placeType === 'district') {
+    return 'region';
+  }
+  
+  // Cities/places
+  if (placeType === 'place' || placeType === 'locality' || placeType === 'neighborhood') {
+    return 'city';
+  }
+  
+  return 'other';
+}
+
+// Get icon for destination type
+function getDestinationIcon(destType: DestinationType) {
+  switch (destType) {
+    case 'mountain_pass':
+      return Mountain;
+    case 'scenic_route':
+      return Route;
+    case 'landmark':
+      return Landmark;
+    case 'region':
+      return Globe;
+    case 'city':
+    default:
+      return MapPin;
+  }
+}
+
+// Get color class for destination type
+function getDestinationColor(destType: DestinationType) {
+  switch (destType) {
+    case 'mountain_pass':
+      return 'text-emerald-400 bg-emerald-500/20';
+    case 'scenic_route':
+      return 'text-amber-400 bg-amber-500/20';
+    case 'landmark':
+      return 'text-purple-400 bg-purple-500/20';
+    case 'region':
+      return 'text-cyan-400 bg-cyan-500/20';
+    case 'city':
+    default:
+      return 'text-alpine-400 bg-alpine-500/20';
+  }
 }
 
 export function DestinationSearch() {
@@ -20,6 +151,7 @@ export function DestinationSearch() {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [isFocused, setIsFocused] = useState(false);
+  const [activeCategory, setActiveCategory] = useState<SearchCategory>('all');
   const inputRef = useRef<HTMLInputElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const debounceRef = useRef<NodeJS.Timeout>();
@@ -27,7 +159,7 @@ export function DestinationSearch() {
   const { addStop } = useTripStore();
   
   // Search for destinations using Mapbox Geocoding API
-  const searchDestinations = async (searchQuery: string) => {
+  const searchDestinations = async (searchQuery: string, category: SearchCategory) => {
     if (!searchQuery.trim() || searchQuery.length < 2) {
       setResults([]);
       return;
@@ -42,12 +174,22 @@ export function DestinationSearch() {
     setIsSearching(true);
     
     try {
-      // Focus on places (cities, towns, etc.) and limit to Europe for better results
+      const categoryConfig = SEARCH_CATEGORIES[category];
+      
+      // Build the search query - add category-specific keywords for better results
+      let enhancedQuery = searchQuery;
+      if (category === 'mountain_passes' && !searchQuery.toLowerCase().includes('pass')) {
+        enhancedQuery = `${searchQuery} pass`;
+      }
+      if (category === 'scenic_routes' && !searchQuery.toLowerCase().includes('route') && !searchQuery.toLowerCase().includes('way')) {
+        enhancedQuery = `${searchQuery} route`;
+      }
+      
       const response = await fetch(
-        `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(searchQuery)}.json?` +
+        `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(enhancedQuery)}.json?` +
         `access_token=${token}&` +
-        `types=place,locality,neighborhood,poi&` +
-        `limit=6&` +
+        `types=${categoryConfig.types}&` +
+        `limit=8&` +
         `language=en`
       );
       
@@ -70,7 +212,7 @@ export function DestinationSearch() {
     }
     
     debounceRef.current = setTimeout(() => {
-      searchDestinations(query);
+      searchDestinations(query, activeCategory);
     }, 300);
     
     return () => {
@@ -78,7 +220,7 @@ export function DestinationSearch() {
         clearTimeout(debounceRef.current);
       }
     };
-  }, [query]);
+  }, [query, activeCategory]);
   
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -101,19 +243,36 @@ export function DestinationSearch() {
     const context = result.context || [];
     const countryContext = context.find((c) => c.id.startsWith('country'));
     const regionContext = context.find((c) => c.id.startsWith('region'));
+    const placeContext = context.find((c) => c.id.startsWith('place'));
+    
+    const destinationType = detectDestinationType(result, activeCategory);
+    
+    // For non-city destinations, use the place from context as the "city" if available
+    const cityName = destinationType === 'city' 
+      ? result.text 
+      : (placeContext?.text || regionContext?.text || result.text);
     
     const location: Location = {
       name: result.text,
-      city: result.text,
+      city: cityName,
       country: countryContext?.text || 'Unknown',
       countryCode: countryContext?.short_code?.toUpperCase() || '',
       lat: result.center[1],
       lng: result.center[0],
       placeId: result.id,
+      destinationType,
     };
     
     addStop(location);
-    toast.success(`Added ${location.name} to your trip!`);
+    
+    // Show destination type in toast
+    const typeLabel = destinationType === 'mountain_pass' ? '🏔️ Mountain pass' 
+      : destinationType === 'scenic_route' ? '🛣️ Scenic route'
+      : destinationType === 'landmark' ? '🏛️ Landmark'
+      : destinationType === 'region' ? '🌍 Region'
+      : '📍 Destination';
+    
+    toast.success(`Added ${typeLabel}: ${location.name}!`);
     
     // Reset search
     setQuery('');
@@ -125,6 +284,36 @@ export function DestinationSearch() {
   
   return (
     <div className="relative">
+      {/* Category tabs */}
+      <div className="flex gap-1 mb-2 overflow-x-auto pb-1 scrollbar-hide">
+        {(Object.entries(SEARCH_CATEGORIES) as [SearchCategory, CategoryConfig][]).map(([key, config]) => {
+          const Icon = config.icon;
+          const isActive = activeCategory === key;
+          return (
+            <button
+              key={key}
+              onClick={() => {
+                setActiveCategory(key);
+                if (query.length >= 2) {
+                  searchDestinations(query, key);
+                }
+              }}
+              title={config.description}
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap',
+                'transition-all duration-200',
+                isActive
+                  ? 'bg-alpine-500 text-white'
+                  : 'bg-slate-800/50 text-slate-400 hover:bg-slate-700/50 hover:text-slate-300'
+              )}
+            >
+              <Icon size={14} />
+              {config.label}
+            </button>
+          );
+        })}
+      </div>
+      
       {/* Search input */}
       <div className="relative">
         <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -141,7 +330,15 @@ export function DestinationSearch() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onFocus={() => setIsFocused(true)}
-          placeholder="Search for a destination..."
+          placeholder={
+            activeCategory === 'mountain_passes' 
+              ? "Search mountain passes (e.g., Brenner, Grossglockner)..."
+              : activeCategory === 'scenic_routes'
+              ? "Search scenic routes (e.g., Route 66, Wild Atlantic Way)..."
+              : activeCategory === 'landmarks'
+              ? "Search landmarks and attractions..."
+              : "Search for a destination..."
+          }
           className={cn(
             'w-full h-10 pl-10 pr-10 rounded-xl',
             'bg-slate-800/50 border border-slate-700/50',
@@ -188,6 +385,18 @@ export function DestinationSearch() {
                 const countryContext = context.find((c) => c.id.startsWith('country'));
                 const countryCode = countryContext?.short_code?.toUpperCase() || '';
                 
+                // Detect destination type for icon and color
+                const destType = detectDestinationType(result, activeCategory);
+                const DestIcon = getDestinationIcon(destType);
+                const colorClass = getDestinationColor(destType);
+                
+                // Get a label for the destination type
+                const typeLabel = destType === 'mountain_pass' ? 'Pass'
+                  : destType === 'scenic_route' ? 'Route'
+                  : destType === 'landmark' ? 'Landmark'
+                  : destType === 'region' ? 'Region'
+                  : null;
+                
                 return (
                   <button
                     key={result.id}
@@ -197,14 +406,22 @@ export function DestinationSearch() {
                       'hover:bg-slate-700/50 transition-colors'
                     )}
                   >
-                    <div className="w-8 h-8 rounded-lg bg-alpine-500/20 flex items-center justify-center flex-shrink-0">
-                      <MapPin size={16} className="text-alpine-400" />
+                    <div className={cn('w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0', colorClass.split(' ')[1])}>
+                      <DestIcon size={16} className={colorClass.split(' ')[0]} />
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="font-medium text-white truncate">
                           {result.text}
                         </span>
+                        {typeLabel && (
+                          <span className={cn(
+                            'text-[10px] px-1.5 py-0.5 rounded font-medium uppercase tracking-wide',
+                            colorClass
+                          )}>
+                            {typeLabel}
+                          </span>
+                        )}
                         {countryCode && (
                           <span className="text-sm">{getCountryFlag(countryCode)}</span>
                         )}
@@ -221,7 +438,12 @@ export function DestinationSearch() {
           ) : query.length >= 2 ? (
             <div className="p-4 text-center text-slate-400">
               <MapPin size={20} className="mx-auto mb-2 opacity-50" />
-              <span className="text-sm">No destinations found</span>
+              <span className="text-sm">No {activeCategory === 'all' ? 'destinations' : SEARCH_CATEGORIES[activeCategory].description.toLowerCase()} found</span>
+              {activeCategory !== 'all' && (
+                <p className="text-xs mt-1 text-slate-500">
+                  Try the "All" tab for broader results
+                </p>
+              )}
             </div>
           ) : null}
         </div>

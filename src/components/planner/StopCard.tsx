@@ -15,13 +15,34 @@ import {
   Info,
   Clock,
   Bed,
-  Navigation
+  Navigation,
+  Mountain,
+  Route,
+  Landmark,
+  Globe
 } from 'lucide-react';
-import { Stop, StopType } from '@/types';
+import { Stop, StopType, DestinationType } from '@/types';
 import { useTripStore } from '@/store/tripStore';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { getCountryFlag, cn } from '@/lib/utils';
+
+// Helper to get destination type display info
+function getDestinationTypeInfo(destType?: DestinationType) {
+  switch (destType) {
+    case 'mountain_pass':
+      return { icon: Mountain, label: 'Pass', colorClass: 'text-emerald-400 bg-emerald-500/20' };
+    case 'scenic_route':
+      return { icon: Route, label: 'Route', colorClass: 'text-amber-400 bg-amber-500/20' };
+    case 'landmark':
+      return { icon: Landmark, label: 'Landmark', colorClass: 'text-purple-400 bg-purple-500/20' };
+    case 'region':
+      return { icon: Globe, label: 'Region', colorClass: 'text-cyan-400 bg-cyan-500/20' };
+    case 'city':
+    default:
+      return null; // Cities don't need a special badge
+  }
+}
 
 interface StopCardProps {
   stop: Stop;
@@ -130,10 +151,27 @@ export function StopCard({
           
           {/* Location info */}
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 mb-1">
+            <div className="flex items-center gap-2 mb-1 flex-wrap">
               <h3 className="font-medium text-white truncate">
                 {stop.location.name}
               </h3>
+              {/* Destination type badge */}
+              {(() => {
+                const typeInfo = getDestinationTypeInfo(stop.location.destinationType);
+                if (typeInfo) {
+                  const TypeIcon = typeInfo.icon;
+                  return (
+                    <span className={cn(
+                      'inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium uppercase tracking-wide',
+                      typeInfo.colorClass
+                    )}>
+                      <TypeIcon size={10} />
+                      {typeInfo.label}
+                    </span>
+                  );
+                }
+                return null;
+              })()}
               <Badge variant="default" size="sm">
                 {getCountryFlag(stop.location.countryCode)}
               </Badge>
@@ -144,7 +182,12 @@ export function StopCard({
               )}
             </div>
             <p className="text-sm text-slate-400 truncate">
-              {stop.location.city}, {stop.location.country}
+              {stop.location.destinationType === 'city' || !stop.location.destinationType
+                ? `${stop.location.city}, ${stop.location.country}`
+                : stop.location.city !== stop.location.name
+                  ? `Near ${stop.location.city}, ${stop.location.country}`
+                  : stop.location.country
+              }
             </p>
           </div>
           

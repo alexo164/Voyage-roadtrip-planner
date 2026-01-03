@@ -1,5 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { Trip, PriceData, PriceAnalysis } from '@/types';
+import { 
+  getFlightPriceAnalysis, 
+  isAmadeusConfigured, 
+  getCityCodeSync,
+  searchFlights
+} from '@/lib/amadeus';
 
 // Simulated seasonal price multipliers for different regions
 const SEASONAL_MULTIPLIERS = {
@@ -26,6 +32,14 @@ const BASE_PRICES = {
   carRentalPerDay: 45,     // Compact car
   flightFromMunich: 150,   // Average flight price
 };
+
+// Cache for Amadeus price data
+interface PriceCache {
+  [key: string]: {
+    price: number;
+    fetchedAt: number;
+  };
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -54,6 +68,79 @@ async function calculateOptimalPricing(trip: Trip, originAirport?: string): Prom
   const pricesByDate: PriceData[] = [];
   const today = new Date();
   
+  // Get first destination for flight pricing
+  const firstStop = trip.stops[0];
+  const destinationCode = firstStop ? getCityCodeSync(firstStop.location.city) : null;
+  const originCode = originAirport || 'MUC'; // Default to Munich
+  
+  // Try to get real flight prices from Amadeus
+  let amadeusFlightPrices: Record<number, number> = {};
+  
+  if (isAmadeusConfigured() && destinationCode) {
+    console.log('Using Amadeus API for price optimization...');
+    
+    // Fetch flight prices for each month (sample dates)
+    const flightPricePromises = [];
+    
+    for (let monthOffset = 0; monthOffset < 12; monthOffset++) {
+      const checkDate = new Date(today);
+      checkDate.setMonth(today.getMonth() + monthOffset);
+      // Use the 15th of each month as sample
+      checkDate.setDate(15);
+      const dateStr = checkDate.toISOString().split('T')[0];
+      
+      flightPricePromises.push(
+        (async () => {
+          try {
+            // Try price analysis API first
+            const analysis = await getFlightPriceAnalysis({
+              originIataCode: originCode,
+              destinationIataCode: destinationCode,
+              departureDate: dateStr,
+              currencyCode: 'EUR',
+            });
+            
+            if (analysis?.price?.median) {
+              return { month: monthOffset, price: parseFloat(analysis.price.median) };
+            }
+            
+            // Fallback: try actual flight search for that date
+            const flights = await searchFlights({
+              originLocationCode: originCode,
+              destinationLocationCode: destinationCode,
+              departureDate: dateStr,
+              adults: 1,
+              currencyCode: 'EUR',
+              max: 3,
+            });
+            
+            if (flights.length > 0) {
+              const avgPrice = flights.reduce((sum, f) => sum + parseFloat(f.price.grandTotal), 0) / flights.length;
+              return { month: monthOffset, price: avgPrice };
+            }
+            
+            return { month: monthOffset, price: null };
+          } catch (error) {
+            console.error(`Failed to get flight price for month ${monthOffset}:`, error);
+            return { month: monthOffset, price: null };
+          }
+        })()
+      );
+    }
+    
+    try {
+      const results = await Promise.all(flightPricePromises);
+      results.forEach(({ month, price }) => {
+        if (price !== null) {
+          amadeusFlightPrices[month] = price;
+        }
+      });
+      console.log(`Retrieved ${Object.keys(amadeusFlightPrices).length} flight prices from Amadeus`);
+    } catch (error) {
+      console.error('Error fetching Amadeus prices:', error);
+    }
+  }
+  
   // Calculate prices for the next 12 months
   for (let monthOffset = 0; monthOffset < 12; monthOffset++) {
     const checkDate = new Date(today);
@@ -72,16 +159,27 @@ async function calculateOptimalPricing(trip: Trip, originAirport?: string): Prom
     // Car rental for the entire trip
     const carRentalCost = BASE_PRICES.carRentalPerDay * trip.totalDays * seasonalMultiplier;
     
-    // Flight cost (if applicable)
-    const flightCost = originAirport ? BASE_PRICES.flightFromMunich * seasonalMultiplier : 0;
+    // Flight cost - use Amadeus data if available, otherwise estimate
+    let flightCost = 0;
+    if (originAirport || destinationCode) {
+      if (amadeusFlightPrices[monthOffset] !== undefined) {
+        // Use real Amadeus price
+        flightCost = amadeusFlightPrices[monthOffset];
+      } else {
+        // Fallback to estimate
+        flightCost = BASE_PRICES.flightFromMunich * seasonalMultiplier;
+      }
+    }
     
-    // Add some randomness to simulate real-world price variations
-    const randomVariation = 0.9 + Math.random() * 0.2; // ±10%
+    // Add some randomness only if using estimated prices
+    const randomVariation = Object.keys(amadeusFlightPrices).length > 0 
+      ? 1.0 
+      : 0.9 + Math.random() * 0.2;
     
     pricesByDate.push({
       date: new Date(checkDate),
       hotelAvg: Math.round(hotelCost * randomVariation),
-      flightPrice: Math.round(flightCost * randomVariation),
+      flightPrice: Math.round(flightCost),
       carRentalPerDay: Math.round(BASE_PRICES.carRentalPerDay * seasonalMultiplier * randomVariation),
       total: Math.round((hotelCost + carRentalCost + flightCost) * randomVariation),
     });
@@ -97,6 +195,11 @@ async function calculateOptimalPricing(trip: Trip, originAirport?: string): Prom
   
   // Generate recommendations
   const recommendations = generateRecommendations(trip, optimalMonth, pricesByDate);
+  
+  // Add note about data source
+  if (Object.keys(amadeusFlightPrices).length > 0) {
+    recommendations.unshift('✈️ Flight prices powered by Amadeus real-time data');
+  }
   
   // Calculate breakdown for optimal period
   const breakdown = {
